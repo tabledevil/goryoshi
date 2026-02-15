@@ -52,6 +52,35 @@ sudo ./scan <volume> <mount point> <extract path>
 sudo ./scan /dev/sda1 / /usb/evidence
 ```
 
+#### golang (linux, libtsk)
+
+This repository also contains a Go implementation that can auto-resolve the best device node to scan for a given mountpoint by using `/proc/self/mountinfo` and Linux sysfs (dm-crypt/LVM stacks). It currently supports scanning ext2/3/4 filesystems on Linux via `libtsk` (cgo).
+
+```
+sudo apt install libtsk-dev build-essential
+git clone https://github.com/fkie-cad/ryoshi.git
+cd ryoshi
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o ryoshi ./cmd/ryoshi
+```
+
+Auto-resolve the device for a mountpoint:
+
+```
+sudo ./ryoshi --mount / --extract /usb/evidence
+```
+
+Inspect what device it will read (and the dm/LVM/crypt stack) without scanning:
+
+```
+./ryoshi --mount / --explain-device
+```
+
+Override the device explicitly:
+
+```
+sudo ./ryoshi --volume /dev/sda1 --mount / --extract /usb/evidence
+```
+
 #### dissect
 
 Python >= 3.7 is required. The following instructions also assume *pip* is installed.

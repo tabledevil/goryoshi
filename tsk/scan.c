@@ -110,21 +110,19 @@ TSK_WALK_RET_ENUM scan_callback(TSK_FS_FILE *file, const char *path, void *ptr) 
 
     if (file->name->type == TSK_FS_NAME_TYPE_REG) {
         char buf[1024];
+        ssize_t n;
         unsigned int offset;
         FILE *fp;
 
         mkdir_p(extract_path);
         strcat(extract_path, file->name->name);
 
-        fp = fopen(extract_path, "ab");
+        fp = fopen(extract_path, "wb");
         offset = 0;
-        while(tsk_fs_file_read(file, offset, buf, 1024, 0) > 0) {
-            for (int i = 0; i < 1024; i++) {
-                if (buf[i]) {
-                    fwrite(&buf[i], 1, 1, fp);
-                }
-            }
-            offset += 1024;
+        while((n = tsk_fs_file_read(file, offset, buf, 1024, 0)) > 0) {
+            // Write bytes verbatim; do not drop NUL bytes.
+            fwrite(buf, 1, (size_t)n, fp);
+            offset += (unsigned int)n;
         }
         fclose(fp);
 
