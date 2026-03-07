@@ -6,6 +6,7 @@
 #include <tsk/libtsk.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 // Skip the /run directory (since it produces many false positives)
 
@@ -44,6 +45,13 @@ static void mkdir_p(const char *dir) {
 
 TSK_WALK_RET_ENUM scan_callback(TSK_FS_FILE *file, const char *path, void *ptr) {
 
+    if (file == NULL || file->name == NULL || file->name->name == NULL) {
+        return TSK_WALK_CONT;
+    }
+    if (strcmp(file->name->name, ".") == 0 || strcmp(file->name->name, "..") == 0) {
+        return TSK_WALK_CONT;
+    }
+
     // Skip links, tsk virtual files/dirs and undefined files
 
     if (file->name->type == TSK_FS_NAME_TYPE_LNK || 
@@ -72,7 +80,7 @@ TSK_WALK_RET_ENUM scan_callback(TSK_FS_FILE *file, const char *path, void *ptr) 
     // Skip the /run directory
 
     #if ignore_run_dir != 0
-    if (strncmp("run", path, 3) == 0) {
+    if (strcmp(path, "run") == 0 || strncmp(path, "run/", 4) == 0) {
         return TSK_WALK_CONT;
     }
     #endif
@@ -80,22 +88,28 @@ TSK_WALK_RET_ENUM scan_callback(TSK_FS_FILE *file, const char *path, void *ptr) 
     sprintf(full_path, "%s%s", mount_point, path);
 
     dirp = opendir(full_path);
+    int visible = 0;
     if (dirp == NULL) {
-        printf("Failed to open directory: %s\n", full_path);
+        // If parent path is not visible in userspace, treat children as hidden too.
+        if (errno != ENOENT && errno != ENOTDIR) {
+            printf("Failed to open directory: %s (errno=%d)\n", full_path, errno);
+            return TSK_WALK_CONT;
+        }
+    } else {
+        do {
+            dp = readdir(dirp);
+            if (dp != NULL) {
+                if (strcmp(dp->d_name, file->name->name) == 0) {
+                    visible = 1;
+                    break;
+                }
+            }
+        } while(dp != NULL);
+        closedir(dirp);
+    }
+    if (visible) {
         return TSK_WALK_CONT;
     }
-
-    do {
-        dp = readdir(dirp);
-        if (dp != NULL) {
-            if (strcmp(dp->d_name, file->name->name) == 0) {
-                closedir(dirp);
-                return TSK_WALK_CONT;
-            }
-        }
-    } while(dp != NULL);
-
-    closedir(dirp);
 
     printf("Hidden: %s%s (%li)\n", full_path, file->name->name, file->name->meta_addr);
     hidden_files += 1;
@@ -112,6 +126,7 @@ TSK_WALK_RET_ENUM scan_callback(TSK_FS_FILE *file, const char *path, void *ptr) 
         char buf[1024];
         ssize_t n;
         unsigned int offset;
+        unsigned long long bytes_written = 0;
         FILE *fp;
 
         mkdir_p(extract_path);
@@ -121,10 +136,20 @@ TSK_WALK_RET_ENUM scan_callback(TSK_FS_FILE *file, const char *path, void *ptr) 
         offset = 0;
         while((n = tsk_fs_file_read(file, offset, buf, 1024, 0)) > 0) {
             // Write bytes verbatim; do not drop NUL bytes.
-            fwrite(buf, 1, (size_t)n, fp);
+            size_t nw = fwrite(buf, 1, (size_t)n, fp);
+            bytes_written += nw;
+            if (nw != (size_t)n) {
+                printf("Short write while extracting: %s\n", extract_path);
+                break;
+            }
             offset += (unsigned int)n;
         }
         fclose(fp);
+
+        if (file->meta && bytes_written != (unsigned long long)file->meta->size) {
+            printf("Warning: extracted size mismatch for %s (wrote=%llu expected=%llu)\n",
+                extract_path, bytes_written, (unsigned long long)file->meta->size);
+        }
 
         TSK_FS_HASH_RESULTS hashes;
 
@@ -133,11 +158,11 @@ TSK_WALK_RET_ENUM scan_callback(TSK_FS_FILE *file, const char *path, void *ptr) 
         }
 
         printf("Extracted: %s | MD5=", extract_path);
-        for (int i = 0; i < TSK_MD5_DIGEST_LENGTH; i++) {
+        for (size_t i = 0; i < sizeof(hashes.md5_digest); i++) {
             printf("%02x", hashes.md5_digest[i]);
         }
         printf(" SHA1=");
-        for (int i = 0; i < TSK_SHA_DIGEST_LENGTH; i++) {
+        for (size_t i = 0; i < sizeof(hashes.sha1_digest); i++) {
             printf("%02x", hashes.sha1_digest[i]);
         }
         printf("\n");
@@ -190,7 +215,7 @@ int main(int argc, char *argv[]) {
     extract_dir = argv[3];
     void *ptr = NULL;
 
-    tsk_fs_dir_walk(filesystem, filesystem->root_inum, TSK_FS_DIR_WALK_FLAG_RECURSE | TSK_FS_DIR_WALK_FLAG_NOORPHAN, scan_callback, ptr);
+    tsk_fs_dir_walk(filesystem, filesystem->root_inum, TSK_FS_DIR_WALK_FLAG_ALLOC | TSK_FS_DIR_WALK_FLAG_RECURSE | TSK_FS_DIR_WALK_FLAG_NOORPHAN, scan_callback, ptr);
 
     tsk_fs_close(filesystem);
     tsk_img_close(disk_image);

@@ -1,3 +1,3 @@
-module github.com/fkie-cad/ryoshi
+module github.com/tabledevil/goryoshi
 
 go 1.22.3

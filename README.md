@@ -27,9 +27,13 @@ During extraction, the utilities attempt to replicate the directory structure of
 
 ### Installation & Usage
 
-We provide two different implementations: One is based on Brian Carrier's *The Sleuth Kit* and is written in C, while the other uses Dissect, a more modern forensic library written in Python. Both offer the same capabilities and should be chosen depending on the situation. In general: The C version is slightly faster, while the Python version is more portable. There are also small differences in supported file systems. Please view their respective documentations for details.
+This repository contains three implementations of the same basic workflow:
 
-To be able to parse the disk, both implementations require root privileges. As arguments, they take:
+- A standalone Go scanner for Linux that auto-resolves the backing device for a mountpoint and reads ext2/3/4 directly without `libtsk`, Python, or cgo.
+- A legacy C implementation based on Brian Carrier's *The Sleuth Kit*.
+- A Python implementation based on Dissect.
+
+To be able to parse raw block devices, the implementations require root privileges. As arguments, they take:
 
 **\<volume\>** The disk/volume/filesystem to be parsed. It has to contain a supported file system. If you want to parse an encrypted volume or other logical volume, use the corresponding mapper instead of specifying the volume directly (e.g. /dev/mapper/ubuntu--vg-ubuntu--lv).<br>
 **\<mount point\>** The path where the specified volume is mounted.<br>
@@ -43,7 +47,7 @@ Note, that statically compiling the libtsk can greatly reduce this utility's foo
 
 ```
 sudo apt install libtsk-dev build-essential
-git clone https://github.com/fkie-cad/ryoshi.git
+git clone https://github.com/tabledevil/goryoshi.git
 cd ryoshi/tsk
 make
 ```
@@ -52,15 +56,21 @@ sudo ./scan <volume> <mount point> <extract path>
 sudo ./scan /dev/sda1 / /usb/evidence
 ```
 
-#### golang (linux, libtsk)
+#### golang (linux, pure go)
 
-This repository also contains a Go implementation that can auto-resolve the best device node to scan for a given mountpoint by using `/proc/self/mountinfo` and Linux sysfs (dm-crypt/LVM stacks). It currently supports scanning ext2/3/4 filesystems on Linux via `libtsk` (cgo).
+The Go implementation can auto-resolve the best device node to scan for a given mountpoint by using `/proc/self/mountinfo` and Linux sysfs (dm-crypt/LVM stacks). It currently supports scanning ext2/3/4 filesystems directly in pure Go. The default build does not require `libtsk`, Python, or cgo on the target machine.
 
 ```
-sudo apt install libtsk-dev build-essential
-git clone https://github.com/fkie-cad/ryoshi.git
+git clone https://github.com/tabledevil/goryoshi.git
 cd ryoshi
-CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o ryoshi ./cmd/ryoshi
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ryoshi ./cmd/ryoshi
+```
+
+Build one binary per target architecture, for example:
+
+```
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ryoshi-linux-amd64 ./cmd/ryoshi
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o ryoshi-linux-arm64 ./cmd/ryoshi
 ```
 
 Auto-resolve the device for a mountpoint:
@@ -81,6 +91,8 @@ Override the device explicitly:
 sudo ./ryoshi --volume /dev/sda1 --mount / --extract /usb/evidence
 ```
 
+The older cgo/libtsk-backed Go scanner is still available for comparison builds via `-tags libtsk`, but it is no longer the default path.
+
 #### dissect
 
 Python >= 3.7 is required. The following instructions also assume *pip* is installed.
@@ -88,7 +100,7 @@ Python >= 3.7 is required. The following instructions also assume *pip* is insta
 
 ```
 sudo pip install dissect
-git clone https://github.com/fkie-cad/ryoshi.git
+git clone https://github.com/tabledevil/goryoshi.git
 cd ryoshi/dissect
 ```
 ```
@@ -103,7 +115,7 @@ sudo apt install python3-venv binutils
 python3 -m venv .venv
 . .venv/bin/activate
 pip install dissect pyinstaller
-git clone https://github.com/fkie-cad/ryoshi.git
+git clone https://github.com/tabledevil/goryoshi.git
 cd ryoshi/dissect
 pyinstaller -F --clean --hidden-import pkgutil --hidden-import dissect --collect-submodules dissect dscan.py 
 cd dist

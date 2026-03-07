@@ -28,7 +28,12 @@ def is_visible(path: str) -> bool:
     parent = p.parent.absolute()
     try:
         return p.name in listdir(parent)
-    except:
+    except FileNotFoundError:
+        # Parent directory itself is hidden or unavailable in userspace view.
+        return False
+    except NotADirectoryError:
+        return False
+    except Exception:
         print("Failed to open", path)
         return True
     
@@ -36,14 +41,17 @@ def whitelist(path: str) -> bool:
     if path == "/":
         return True
     p = Path(path)
-    if str(p.parents[-2]) == "/run" and IGNORE_RUN:
+    if IGNORE_RUN and (str(p) == "/run" or str(p).startswith("/run/")):
         return True
     return False
 
 def extract_file(file: filesystem.FilesystemEntry, path: str) -> None:
-    out = open(path, "wb")
-    out.write(file.open().read())
-    out.close()
+    with file.open() as src, open(path, "wb") as out:
+        while True:
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
 
 def scan_filesystem(disk_path: str, mount_point: str, extract_path: str) -> int:
     try:

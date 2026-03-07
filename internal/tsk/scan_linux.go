@@ -1,4 +1,4 @@
-//go:build linux && cgo
+//go:build linux && cgo && libtsk
 
 package tsk
 
@@ -12,6 +12,7 @@ package tsk
 #include <linux/limits.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <tsk/libtsk.h>
 
 typedef struct {
@@ -46,13 +47,18 @@ static void mkdir_p(const char *dir) {
 
 static int path_starts_with_run(const char *path) {
 	// TSK callback path is relative without leading '/'. Examples: "" , "home/user/", "run/".
-	return (path != NULL && strncmp(path, "run", 3) == 0);
+	if (path == NULL) return 0;
+	if (strcmp(path, "run") == 0) return 1;
+	return strncmp(path, "run/", 4) == 0;
 }
 
 static TSK_WALK_RET_ENUM scan_callback(TSK_FS_FILE *file, const char *path, void *ptr) {
 	scan_ctx_t *ctx = (scan_ctx_t*)ptr;
 
 	if (file == NULL || file->name == NULL || file->name->name == NULL) {
+		return TSK_WALK_CONT;
+	}
+	if (strcmp(file->name->name, ".") == 0 || strcmp(file->name->name, "..") == 0) {
 		return TSK_WALK_CONT;
 	}
 
@@ -83,19 +89,26 @@ static TSK_WALK_RET_ENUM scan_callback(TSK_FS_FILE *file, const char *path, void
 	snprintf(dir_path, sizeof(dir_path), "%s%s", ctx->mount_point, (path ? path : ""));
 
 	DIR *dirp = opendir(dir_path);
+	int visible = 0;
 	if (dirp == NULL) {
-		printf("Failed to open directory: %s\n", dir_path);
-		return TSK_WALK_CONT;
-	}
-
-	struct dirent *dp;
-	while ((dp = readdir(dirp)) != NULL) {
-		if (strcmp(dp->d_name, file->name->name) == 0) {
-			closedir(dirp);
+		// If parent path is not visible in userspace, treat children as hidden too.
+		if (errno != ENOENT && errno != ENOTDIR) {
+			printf("Failed to open directory: %s (errno=%d)\n", dir_path, errno);
 			return TSK_WALK_CONT;
 		}
+	} else {
+		struct dirent *dp;
+		while ((dp = readdir(dirp)) != NULL) {
+			if (strcmp(dp->d_name, file->name->name) == 0) {
+				visible = 1;
+				break;
+			}
+		}
+		closedir(dirp);
 	}
-	closedir(dirp);
+	if (visible) {
+		return TSK_WALK_CONT;
+	}
 
 	// Hidden on-disk vs userspace view.
 	printf("Hidden: %s%s (%li)\n", dir_path, file->name->name, file->name->meta_addr);
@@ -127,14 +140,27 @@ static TSK_WALK_RET_ENUM scan_callback(TSK_FS_FILE *file, const char *path, void
 
 		char buf[8192];
 		TSK_OFF_T offset = 0;
+		uint64_t bytes_written = 0;
 		while (1) {
 			ssize_t n = tsk_fs_file_read(file, offset, buf, sizeof(buf), 0);
 			if (n <= 0) break;
 			// IMPORTANT: write bytes verbatim; do not drop NUL bytes.
-			fwrite(buf, 1, (size_t)n, fp);
+			size_t nw = fwrite(buf, 1, (size_t)n, fp);
+			bytes_written += (uint64_t)nw;
+			if (nw != (size_t)n) {
+				printf("Short write while extracting: %s\n", out_path);
+				break;
+			}
 			offset += (TSK_OFF_T)n;
 		}
 		fclose(fp);
+
+		if (file->meta && bytes_written != (uint64_t)file->meta->size) {
+			printf("Warning: extracted size mismatch for %s (wrote=%llu expected=%llu)\n",
+				out_path,
+				(unsigned long long)bytes_written,
+				(unsigned long long)file->meta->size);
+		}
 
 		TSK_FS_HASH_RESULTS hashes;
 		if (tsk_fs_file_hash_calc(file, &hashes, TSK_BASE_HASH_MD5 | TSK_BASE_HASH_SHA1) != 0) {
@@ -143,11 +169,11 @@ static TSK_WALK_RET_ENUM scan_callback(TSK_FS_FILE *file, const char *path, void
 		}
 
 		printf("Extracted: %s | MD5=", out_path);
-		for (int i = 0; i < TSK_MD5_DIGEST_LENGTH; i++) {
+		for (size_t i = 0; i < sizeof(hashes.md5_digest); i++) {
 			printf("%02x", hashes.md5_digest[i]);
 		}
 		printf(" SHA1=");
-		for (int i = 0; i < TSK_SHA_DIGEST_LENGTH; i++) {
+		for (size_t i = 0; i < sizeof(hashes.sha1_digest); i++) {
 			printf("%02x", hashes.sha1_digest[i]);
 		}
 		printf("\n");
@@ -169,7 +195,10 @@ int ryoshi_scan(const char *volume, const char *mount_point, const char *extract
 				int ignore_run, int ignore_empty, int ignore_unalloc,
 				int *out_hidden) {
 	if (out_hidden) *out_hidden = 0;
-	if (volume == NULL || mount_point == NULL || extract_dir == NULL) return -1;
+	if (volume == NULL || mount_point == NULL || extract_dir == NULL) {
+		fflush(NULL);
+		return -1;
+	}
 
 	scan_ctx_t ctx;
 	memset(&ctx, 0, sizeof(ctx));
@@ -185,6 +214,7 @@ int ryoshi_scan(const char *volume, const char *mount_point, const char *extract
 	TSK_IMG_INFO *img = tsk_img_open_utf8_sing(volume, TSK_IMG_TYPE_DETECT, 0);
 	if (img == NULL) {
 		printf("%s is not a valid volume or disk image\n", volume);
+		fflush(NULL);
 		return -2;
 	}
 
@@ -192,6 +222,7 @@ int ryoshi_scan(const char *volume, const char *mount_point, const char *extract
 	if (fs == NULL) {
 		printf("%s does not contain a supported filesystem\n", volume);
 		tsk_img_close(img);
+		fflush(NULL);
 		return -3;
 	}
 
@@ -200,7 +231,7 @@ int ryoshi_scan(const char *volume, const char *mount_point, const char *extract
 		   tsk_fs_type_toname(fs->ftype), (long)fs->inum_count);
 
 	tsk_fs_dir_walk(fs, fs->root_inum,
-					TSK_FS_DIR_WALK_FLAG_RECURSE | TSK_FS_DIR_WALK_FLAG_NOORPHAN,
+					TSK_FS_DIR_WALK_FLAG_ALLOC | TSK_FS_DIR_WALK_FLAG_RECURSE | TSK_FS_DIR_WALK_FLAG_NOORPHAN,
 					scan_callback, &ctx);
 
 	tsk_fs_close(fs);
@@ -214,6 +245,7 @@ int ryoshi_scan(const char *volume, const char *mount_point, const char *extract
 		printf("No hidden files found\n");
 	}
 
+	fflush(NULL);
 	return 0;
 }
 */

@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/fkie-cad/ryoshi/internal/device"
-	"github.com/fkie-cad/ryoshi/internal/tsk"
+	"github.com/tabledevil/goryoshi/internal/device"
+	"github.com/tabledevil/goryoshi/internal/tsk"
 )
 
 func main() {
